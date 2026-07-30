@@ -3,20 +3,17 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="Bilanço Radar V3", layout="wide")
+st.set_page_config(page_title="Bilanço Radar V4", layout="wide")
 
-st.title("🎯 Bilanço Radar ve Sinyal Paneli V3")
+st.title("🎯 Bilanço Radar ve Sinyal Paneli V4")
 st.write("Dinamik Hisse Ekleme Özellikli Canlı Bilanço ve Sürpriz Takip Paneli")
 
-# Oturum (Session State) içinde hisse listemizi tutuyoruz ki sayfa yenilendiğinde silinmesin
+# Oturum (Session State) listesi
 if 'secilen_hisseler' not in st.session_state:
     st.session_state.secilen_hisseler = ['NVDA', 'DELL', 'MU', 'AAPL', 'AMZN', 'CAT', 'MSFT', 'TUPRS.IS', 'FROTO.IS']
 
 # --- ARAYÜZDEN HİSSE EKLEME BÖLÜMÜ ---
 st.sidebar.header("➕ Yeni Hisse Ekle")
-st.sidebar.write("İstediğiniz ABD veya BIST hissesini ekleyin.")
-st.sidebar.caption("Not: BIST için sonuna **.IS** ekleyin (Örn: THYAO.IS). ABD için doğrudan sembol yazın (Örn: AMD).")
-
 yeni_hisse = st.sidebar.text_input("Hisse Sembolü (Ticker):", value="").upper().strip()
 
 if st.sidebar.button("Listeye Ekle"):
@@ -27,7 +24,6 @@ if st.sidebar.button("Listeye Ekle"):
     elif yeni_hisse in st.session_state.secilen_hisseler:
         st.sidebar.warning("Bu hisse zaten listede var.")
 
-# Listeden hisse çıkarma seçeneği de koyalım ki kontrol tamamen sende olsun
 st.sidebar.markdown("---")
 kaldirilacak_hisse = st.sidebar.selectbox("Listeden Çıkarılacak Hisse:", options=["Seçiniz"] + st.session_state.secilen_hisseler)
 if st.sidebar.button("Seçileni Kaldır") and kaldirilacak_hisse != "Seçiniz":
@@ -35,29 +31,49 @@ if st.sidebar.button("Seçileni Kaldır") and kaldirilacak_hisse != "Seçiniz":
     st.sidebar.success(f"{kaldirilacak_hisse} listeden çıkarıldı!")
     st.rerun()
 
-# --- VERİ ÇEKME FONKSİYONU ---
+# --- VERİ ÇEKME FONKSİYONU (Geliştirilmiş & Hata Korumalı) ---
 @st.cache_data(ttl=3600)
 def bilanco_verilerini_getir(sembol_listesi):
     veriler = []
     for sembol in sembol_listesi:
         hisse = yf.Ticker(sembol)
         
-        # 1. Sonraki Bilanço Tarihi
+        # 1. Güncel Fiyat (Geçmiş veriden veya info'dan güvenli çekim)
+        guncel_fiyat = "Veri Yok"
+        try:
+            hist = hisse.history(period="1d")
+            if not hist.empty:
+                guncel_fiyat = round(hist['Close'].iloc[-1], 2)
+            else:
+                guncel_fiyat = round(hisse.info.get('currentPrice', hisse.info.get('regularMarketPrice', 0)), 2)
+        except:
+            pass
+
+        # 2. Sonraki Bilanço Tarihi
         tarih = "Açıklanmadı / Veri Yok"
         try:
-            takvim = hisse.calendar
-            if takvim is not None and not takvim.empty:
-                ham_tarih = takvim.iloc[0, 0]
+            cal = hisse.calendar
+            if isinstance(cal, dict) and 'Earnings Date' in cal:
+                earning_dates = cal['Earnings Date']
+                if earning_dates:
+                    tarih = str(earning_dates[0]).split()[0]
+            elif isinstance(cal, pd.DataFrame) and not cal.empty:
+                ham_tarih = cal.iloc[0, 0]
                 if pd.notnull(ham_tarih):
-                    tarih = ham_tarih.strftime('%Y-%m-%d')
+                    tarih = str(ham_tarih).split()[0]
         except:
             pass
         
-        # 2. Güncel Fiyat
-        try:
-            guncel_fiyat = round(hisse.info.get('currentPrice', hisse.info.get('regularMarketPrice', 0)), 2)
-        except:
-            guncel_fiyat = "Veri Yok"
+        if tarih == "Açıklanmadı / Veri Yok":
+            try:
+                # Alternatif olarak earnings_dates tablosundan gelecek tarihi bulmaya çalışalım
+                ed = hisse.earnings_dates
+                if ed is not None and not ed.empty:
+                    gelecek_tarihler = ed[ed.index > datetime.now()]
+                    if not gelecek_tarihler.empty:
+                        tarih = str(gelecek_tarihler.index[0]).split()[0]
+            except:
+                pass
 
         # 3. Son Çeyrek Sürprizi
         surpriz = "Veri Yok"
@@ -66,7 +82,7 @@ def bilanco_verilerini_getir(sembol_listesi):
             if gecmis_bilancolar is not None and not gecmis_bilancolar.empty:
                 gecmis_bilancolar = gecmis_bilancolar[gecmis_bilancolar.index < datetime.now()]
                 if not gecmis_bilancolar.empty and 'Surprise(%)' in gecmis_bilancolar.columns:
-                    son_surpriz = gecmis_bilancolar['Surprise(%)'].iloc[0]
+                    son_surpriz = gecmis_bilancolar['Surprise(%)'].dropna().iloc[0]
                     if pd.notnull(son_surpriz):
                         surpriz = f"% {round(son_surpriz * 100, 2)}"
         except:
